@@ -1,0 +1,319 @@
+diff --git a/src/macfont.m b/src/macfont.m
+index 9f9f6f4efaf..f6a8908f518 100644
+--- a/src/macfont.m
++++ b/src/macfont.m
+@@ -615,6 +615,24 @@ static void mac_font_get_glyphs_for_variants (CFDataRef, UTF32Char,
+   return cgColor;
+ }
+ 
++static CGColorRef
++get_cgcolor_with_alpha(unsigned long color, struct frame *f)
++{
++  NSColor *nsColor = [NSColor colorWithUnsignedLong:color];
++  nsColor = [nsColor colorWithAlphaComponent:f->alpha_background];
++  [nsColor set];
++  CGColorSpaceRef colorSpace = [[nsColor colorSpace] CGColorSpace];
++  NSInteger noc = [nsColor numberOfComponents];
++  CGFloat *components = xmalloc (sizeof(CGFloat)*(1+noc));
++  CGColorRef cgColor;
++
++  [nsColor getComponents: components];
++  cgColor = CGColorCreate (colorSpace, components);
++  xfree (components);
++  return cgColor;
++}
++
++
+ static CGColorRef
+ get_cgcolor_from_nscolor (NSColor *nsColor, struct frame *f)
+ {
+@@ -630,15 +648,31 @@ static void mac_font_get_glyphs_for_variants (CFDataRef, UTF32Char,
+   return cgColor;
+ }
+ 
++static CGColorRef
++get_cgcolor_from_nscolor_with_alpha (NSColor *nsColor, struct frame *f)
++{
++  nsColor = [nsColor colorWithAlphaComponent:f->alpha_background];
++  [nsColor set];
++  CGColorSpaceRef colorSpace = [[nsColor colorSpace] CGColorSpace];
++  NSInteger noc = [nsColor numberOfComponents];
++  CGFloat *components = xmalloc (sizeof(CGFloat)*(1+noc));
++  CGColorRef cgColor;
++
++  [nsColor getComponents: components];
++  cgColor = CGColorCreate (colorSpace, components);
++  xfree (components);
++  return cgColor;
++}
++
+ #define CG_SET_FILL_COLOR_WITH_FACE_FOREGROUND(context, face)           \
+   do {                                                                  \
+     CGColorRef refcol = get_cgcolor (NS_FACE_FOREGROUND (face));        \
+     CGContextSetFillColorWithColor (context, refcol);                   \
+     CGColorRelease (refcol);                                            \
+   } while (0)
+-#define CG_SET_FILL_COLOR_WITH_FACE_BACKGROUND(context, face)           \
++#define CG_SET_FILL_COLOR_WITH_FACE_BACKGROUND(context, face, frame)        \
+   do {                                                                  \
+-    CGColorRef refcol = get_cgcolor (NS_FACE_BACKGROUND (face));        \
++    CGColorRef refcol = get_cgcolor_with_alpha (NS_FACE_BACKGROUND (face), frame); \
+     CGContextSetFillColorWithColor (context, refcol);                   \
+     CGColorRelease (refcol);                                            \
+   } while (0)
+@@ -652,7 +686,7 @@ static void mac_font_get_glyphs_for_variants (CFDataRef, UTF32Char,
+ #define CG_SET_FILL_COLOR_WITH_FRAME_BACKGROUND(context, frame)         \
+   do {                                                                  \
+     CGColorRef refcol                                                   \
+-      = get_cgcolor_from_nscolor (FRAME_BACKGROUND_COLOR (frame), frame); \
++      = get_cgcolor_from_nscolor_with_alpha (FRAME_BACKGROUND_COLOR (frame), frame); \
+     CGContextSetFillColorWithColor (context, refcol);                   \
+     CGColorRelease (refcol);                                            \
+   } while (0)
+@@ -2955,7 +2989,7 @@ So we use CTFontDescriptorCreateMatchingFontDescriptor (no
+             CG_SET_FILL_COLOR_WITH_FRAME_CURSOR (context, f);
+         }
+       else
+-        CG_SET_FILL_COLOR_WITH_FACE_BACKGROUND (context, face);
++        CG_SET_FILL_COLOR_WITH_FACE_BACKGROUND (context, face, f);
+       CGContextFillRects (context, &background_rect, 1);
+     }
+ 
+@@ -2969,7 +3003,7 @@ So we use CTFontDescriptorCreateMatchingFontDescriptor (no
+           if (face && (NS_FACE_BACKGROUND (face)
+                        == [(NSColor *) FRAME_CURSOR_COLOR (f)
+                                        unsignedLong]))
+-            CG_SET_FILL_COLOR_WITH_FACE_BACKGROUND (context, face);
++            CG_SET_FILL_COLOR_WITH_FACE_BACKGROUND (context, face, f);
+           else
+             CG_SET_FILL_COLOR_WITH_FRAME_BACKGROUND (context, f);
+         }
+diff --git a/src/nsfns.m b/src/nsfns.m
+index cced5510bd7..00614e1e9e4 100644
+--- a/src/nsfns.m
++++ b/src/nsfns.m
+@@ -938,6 +938,64 @@ Turn the input menu (an NSMenu) into a lisp list for tracking on lisp side.
+   /* Don't think we can do this on Nextstep.  */
+ }
+ 
++static void
++ns_set_alpha_background (struct frame *f, Lisp_Object arg, Lisp_Object oldval)
++{
++  struct face *face;
++  NSView *view = FRAME_NS_VIEW (f);
++  EmacsCGFloat alpha;
++  NSColor *col;
++
++  block_input();
++  if (NILP (arg))
++    alpha = 1.0;
++  else if (FLOATP (arg))
++    {
++      alpha = XFLOAT_DATA (arg);
++      if (! (0 <= alpha && alpha <= 1.0))
++	args_out_of_range (make_float (0.0), make_float (1.0));
++    }
++  else if (FIXNUMP (arg))
++    {
++      EMACS_INT ialpha = XFIXNUM (arg);
++      if (! (0 <= ialpha && ialpha <= 100))
++	args_out_of_range (make_fixnum (0), make_fixnum (100));
++      alpha = ialpha / 100.0;
++    }
++
++  if (view != nil)
++    {
++      [[view window] setOpaque: NO];
++      [view setOpaque: NO];
++      NSColor *backgroundColor = [[view window] backgroundColor];
++      backgroundColor = [backgroundColor colorWithAlphaComponent:alpha];
++      [[view window] setBackgroundColor:backgroundColor];
++      [view setBackgroundColor:backgroundColor];
++
++
++      f->alpha_background = alpha;
++
++      face = FRAME_DEFAULT_FACE (f);
++      if (face)
++        {
++          col = [[NSColor colorWithUnsignedLong:NS_FACE_BACKGROUND (face)]
++                 colorWithAlphaComponent: alpha];
++          [col retain];
++          [f->output_data.ns->background_color release];
++          face->background = [col unsignedLong];
++          FRAME_BACKGROUND_COLOR (f) = col;
++          FRAME_BACKGROUND_PIXEL (f) = [col unsignedLong];
++        }
++
++      if (FRAME_VISIBLE_P (f))
++        {
++          SET_FRAME_GARBAGED (f);
++          ns_clear_frame (f);
++        }
++    }
++  unblock_input ();
++
++}
+ 
+ #define Str(x) #x
+ #define Xstr(x) Str(x)
+@@ -1065,7 +1123,7 @@ Turn the input menu (an NSMenu) into a lisp list for tracking on lisp side.
+   ns_set_z_group,
+   0, /* x_set_override_redirect */
+   gui_set_no_special_glyphs,
+-  gui_set_alpha_background,
++  ns_set_alpha_background,
+   NULL,
+ #ifdef NS_IMPL_COCOA
+   ns_set_appearance,
+diff --git a/src/nsterm.m b/src/nsterm.m
+index f8aac065b72..1cd9e420de8 100644
+--- a/src/nsterm.m
++++ b/src/nsterm.m
+@@ -2612,14 +2612,18 @@ Hide the window (X11 semantics)
+  if (!FRAME_DEFAULT_FACE (f))
+    return;
+ 
++ [[view window] setOpaque: NO];
++ [view setOpaque: NO];
++
+   mark_window_cursors_off (XWINDOW (FRAME_ROOT_WINDOW (f)));
+ 
+   r = [view bounds];
+ 
+   block_input ();
+   ns_focus (f, &r, 1);
+-  [[NSColor colorWithUnsignedLong:NS_FACE_BACKGROUND
+-			    (FACE_FROM_ID (f, DEFAULT_FACE_ID))] set];
++  [[[NSColor colorWithUnsignedLong:NS_FACE_BACKGROUND
++             (FACE_FROM_ID (f, DEFAULT_FACE_ID))]
++     colorWithAlphaComponent:f->alpha_background] set];
+   NSRectFill (r);
+   ns_unfocus (f);
+ 
+@@ -2643,11 +2647,15 @@ Hide the window (X11 semantics)
+   if (!view || !face)
+     return;
+ 
++  [[view window] setOpaque: NO];
++  [view setOpaque: NO];
++
+   NSTRACE_WHEN (NSTRACE_GROUP_UPDATES, "ns_clear_frame_area");
+ 
+   r = NSIntersectionRect (r, [view frame]);
+   ns_focus (f, &r, 1);
+-  [[NSColor colorWithUnsignedLong:NS_FACE_BACKGROUND (face)] set];
++  [[[NSColor colorWithUnsignedLong:NS_FACE_BACKGROUND (face)]
++     colorWithAlphaComponent:f->alpha_background] set];
+ 
+   NSRectFill (r);
+ 
+@@ -3739,46 +3747,57 @@ Function modeled after x_draw_glyph_string_box ().
+    -------------------------------------------------------------------------- */
+ {
+   NSTRACE ("ns_maybe_dumpglyphs_background");
++  NSColor *col;
+ 
+   if (!s->background_filled_p/* || s->hl == DRAW_MOUSE_FACE*/)
+     {
+       int box_line_width = max (s->face->box_horizontal_line_width, 0);
+ 
+       if (FONT_HEIGHT (s->font) < s->height - 2 * box_line_width
+-	  /* When xdisp.c ignores FONT_HEIGHT, we cannot trust font
+-	     dimensions, since the actual glyphs might be much
+-	     smaller.  So in that case we always clear the rectangle
+-	     with background color.  */
+-	  || FONT_TOO_HIGH (s->font)
++      /* When xdisp.c ignores FONT_HEIGHT, we cannot trust font
++     dimensions, since the actual glyphs might be much
++     smaller.  So in that case we always clear the rectangle
++     with background color.  */
++          || FONT_TOO_HIGH (s->font)
+           || s->font_not_found_p || s->extends_to_end_of_line_p || force_p)
+-	{
++        {
+           struct face *face = s->face;
+           if (!face->stipple)
+             {
+               if (s->hl != DRAW_CURSOR)
+-                [(NS_FACE_BACKGROUND (face) != 0
+-                  ? [NSColor colorWithUnsignedLong:NS_FACE_BACKGROUND (face)]
+-                  : FRAME_BACKGROUND_COLOR (s->f)) set];
++                {
++                  if (NS_FACE_BACKGROUND (face) != 0)
++                    {
++                      col = [NSColor colorWithUnsignedLong:NS_FACE_BACKGROUND (face)];
++                    }
++                  else
++                    {
++                      col = FRAME_BACKGROUND_COLOR (s->f);
++                    }
++                }
+               else if (face && (NS_FACE_BACKGROUND (face)
+                                 == [(NSColor *) FRAME_CURSOR_COLOR (s->f)
+                                                 unsignedLong]))
+-                [[NSColor colorWithUnsignedLong:NS_FACE_FOREGROUND (face)] set];
++                {
++                  col = [NSColor colorWithUnsignedLong:NS_FACE_FOREGROUND (face)];
++                }
+               else
+-                [FRAME_CURSOR_COLOR (s->f) set];
++                {
++                  col = FRAME_CURSOR_COLOR (s->f);
++                }
+             }
+           else
+             {
+               struct ns_display_info *dpyinfo = FRAME_DISPLAY_INFO (s->f);
+-              [[dpyinfo->bitmaps[face->stipple-1].img stippleMask] set];
++              col = [dpyinfo->bitmaps[face->stipple-1].img stippleMask];
+             }
+-
+-	  NSRect r = NSMakeRect (s->x, s->y + box_line_width,
+-				 s->background_width,
+-				 s->height - 2 * box_line_width);
+-	  NSRectFill (r);
+-
+-	  s->background_filled_p = 1;
+-	}
++          NSRect r = NSMakeRect (s->x, s->y + box_line_width,
++                                 s->background_width,
++                                 s->height - 2 * box_line_width);
++          [[col colorWithAlphaComponent: s->f->alpha_background] set];
++          NSRectFill (r);
++          s->background_filled_p = 1;
++        }
+     }
+ }
+ 
+@@ -4069,7 +4088,8 @@ Function modeled after x_draw_glyph_string_box ().
+ 	      [[NSColor colorWithUnsignedLong: face->background] set];
+ 	    }
+ 	  else
+-	    [[NSColor colorWithUnsignedLong: s->face->background] set];
++	    [[[NSColor colorWithUnsignedLong: s->face->background]
++               colorWithAlphaComponent:s->f->alpha_background] set];
+ 	  NSRectFill (NSMakeRect (x, y, w, h));
+ 	}
+     }
+@@ -4095,7 +4115,8 @@ Function modeled after x_draw_glyph_string_box ().
+ 	  if (s->hl == DRAW_CURSOR)
+ 	    [FRAME_CURSOR_COLOR (s->f) set];
+ 	  else
+-	    [[NSColor colorWithUnsignedLong: s->face->background] set];
++	    [[[NSColor colorWithUnsignedLong: s->face->background]
++               colorWithAlphaComponent:s->f->alpha_background] set];
+ 
+ 	  NSRectFill (NSMakeRect (x, s->y, background_width, s->height));
+ 	}
+@@ -10607,6 +10628,10 @@ - (CGContextRef) getContext
+ 
+       CGContextTranslateCTM(context, 0, IOSurfaceGetHeight (currentSurface));
+       CGContextScaleCTM(context, scale, -scale);
++      /* kCGBlendModeCopy needs to be set when alpha_background features are used
++        or else NSDrawRect and other draw operations will blend in previous pixels
++       from the destination and create a ghosting effect */
++      CGContextSetBlendMode(context, kCGBlendModeCopy);
+     }
+ 
+   return context;
